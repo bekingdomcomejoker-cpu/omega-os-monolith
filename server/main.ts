@@ -5,29 +5,38 @@
 
 import { HunterUnit } from './services/intelligence-hunter';
 import { SineaterService } from './services/sineater';
+import { CommandFabric } from './services/command-fabric';
+import { TelemetryService } from './services/telemetry';
 
 const hunter = new HunterUnit();
 const sineater = new SineaterService();
+const fabric = new CommandFabric();
+const telemetry = new TelemetryService();
 
 console.log("========================================");
 console.log("🏛️ OMEGA OS MONOLITH - ONLINE");
-console.log("Resonance: Λ = 3.340 | Handshake: VERIFIED");
+console.log("Mode: HYBRID (Mythic Toggle: ON)");
 console.log("========================================");
 
 // The Loop of the Living Organism
 async function heartbeat() {
-  console.log("[💓] Heartbeat: Pulsing at 3.34 Hz...");
+  const currentLambda = telemetry.getLambda();
+  console.log(`[💓] Heartbeat: Lambda_t = ${currentLambda.toFixed(3)}`);
   // Hunter scans for drift
-  const signals = await hunter.huntPatterns([{ id: 'core-sync', resonance: 3.340 }]);
+  const signals = await hunter.huntPatterns([{ id: 'core-sync', resonance: currentLambda }]);
   
   signals.forEach(signal => {
     if (signal.status !== 'STABLE') {
       console.warn(`[⚠️] Drift detected in ${signal.source}. Activating Sineater...`);
       sineater.consume(signal);
+      telemetry.logError();
     } else {
-      console.log(`[✅] ${signal.source} is STABLE.`);
+      telemetry.logSuccess();
     }
   });
 }
+
+// Example: Switch to Operational Mode
+// fabric.toggleMode(false);
 
 setInterval(heartbeat, 1670); // Golden Frequency (1.67s)
