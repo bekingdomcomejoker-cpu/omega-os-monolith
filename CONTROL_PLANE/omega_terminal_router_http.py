@@ -9,7 +9,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 BASE = Path.home() / "omega-local"
 LOGS = BASE / "logs"
@@ -22,6 +22,10 @@ LOCAL_URL = os.environ.get("OMEGA_LOCAL_URL", "http://127.0.0.1:8080/v1/chat/com
 LOCAL_MODEL_NAME = os.environ.get("OMEGA_LOCAL_MODEL_NAME", "local")
 MAX_TOKENS = int(os.environ.get("OMEGA_MAX_TOKENS", "220"))
 TEMPERATURE = float(os.environ.get("OMEGA_TEMPERATURE", "0.2"))
+
+ENABLE_CLIPBOARD = os.environ.get("OMEGA_ENABLE_CLIPBOARD", "1") != "0"
+ENABLE_NOTIFY = os.environ.get("OMEGA_ENABLE_NOTIFY", "1") != "0"
+LOCAL_ONLY = os.environ.get("OMEGA_LOCAL_ONLY", "0") == "1"
 
 
 def utc_now() -> str:
@@ -41,6 +45,8 @@ def save_json(path: Path, data: Dict) -> None:
 
 
 def set_clipboard(text: str) -> None:
+    if not ENABLE_CLIPBOARD:
+        return
     try:
         subprocess.run(
             ["termux-clipboard-set"],
@@ -55,6 +61,8 @@ def set_clipboard(text: str) -> None:
 
 
 def notify_local(title: str, content: str) -> None:
+    if not ENABLE_NOTIFY:
+        return
     try:
         subprocess.run(
             ["termux-notification", "--title", f"ΩTERM {title}", "--content", content[:180]],
@@ -121,6 +129,9 @@ def call_local(route: str, user_prompt: str) -> str:
 
 
 def call_gemini(route: str, user_prompt: str) -> str:
+    if LOCAL_ONLY:
+        return "[ERROR] local backend failed and OMEGA_LOCAL_ONLY=1 blocks Gemini fallback"
+
     api_key = get_api_key()
     if not api_key:
         return "[ERROR] no GEMINI_API_KEY or GOOGLE_API_KEY set"
@@ -131,13 +142,24 @@ def call_gemini(route: str, user_prompt: str) -> str:
         client = genai.Client(api_key=api_key)
         prompt = build_prompt(route, user_prompt)
         resp = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model=os.environ.get("OMEGA_GEMINI_MODEL", "gemini-2.5-flash"),
             contents=prompt,
         )
         text = (resp.text or "").strip()
         return text or "[ERROR] Gemini returned empty output"
     except Exception as e:
         return f"[ERROR] Gemini fallback failed: {e}"
+
+
+def healthcheck() -> Tuple[bool, str]:
+    models_url = LOCAL_URL.rsplit("/v1/", 1)[0] + "/v1/models"
+    req = urllib.request.Request(models_url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        return True, raw[:1000]
+    except Exception as e:
+        return False, str(e)
 
 
 def route_once(route: str, prompt: str) -> str:
@@ -151,6 +173,9 @@ def route_once(route: str, prompt: str) -> str:
             "trigger": route,
             "prompt": prompt,
             "status": "started",
+            "local_only": LOCAL_ONLY,
+            "clipboard_enabled": ENABLE_CLIPBOARD,
+            "notify_enabled": ENABLE_NOTIFY,
         },
     )
 
@@ -189,11 +214,29 @@ def route_once(route: str, prompt: str) -> str:
             "last_prompt": prompt,
             "last_source": source,
             "last_output_preview": output[:240],
+            "local_only": LOCAL_ONLY,
+            "clipboard_enabled": ENABLE_CLIPBOARD,
+            "notify_enabled": ENABLE_NOTIFY,
         },
     )
 
     notify_local("Answer Ready", f"@{route} via {source} — result copied to clipboard")
     return output
+
+
+def parse_flags(argv: list[str]) -> list[str]:
+    global ENABLE_CLIPBOARD, ENABLE_NOTIFY, LOCAL_ONLY
+    remaining: list[str] = []
+    for arg in argv:
+        if arg == "--no-clipboard":
+            ENABLE_CLIPBOARD = False
+        elif arg == "--no-notify":
+            ENABLE_NOTIFY = False
+        elif arg == "--local-only":
+            LOCAL_ONLY = True
+        else:
+            remaining.append(arg)
+    return remaining
 
 
 def shell_loop() -> int:
@@ -204,7 +247,11 @@ def shell_loop() -> int:
     print("  reason explain why the bash wrapper failed under python")
     print("  code write a python function that deduplicates notifications by key")
     print("  r1 analyze this output")
-    print("Type 'exit' to leave.")
+    print("Commands:")
+    print("  healthcheck")
+    print("  exit")
+    print(f"Local URL: {LOCAL_URL}")
+    print(f"Local only: {LOCAL_ONLY} | Clipboard: {ENABLE_CLIPBOARD} | Notify: {ENABLE_NOTIFY}")
     print("=" * 72)
 
     while True:
@@ -218,6 +265,11 @@ def shell_loop() -> int:
             continue
         if raw.lower() in {"exit", "quit"}:
             return 0
+        if raw.lower() == "healthcheck":
+            ok, msg = healthcheck()
+            print("OK" if ok else "FAILED")
+            print(msg)
+            continue
 
         parts = raw.split(" ", 1)
         if len(parts) < 2:
@@ -232,15 +284,24 @@ def shell_loop() -> int:
 
 
 def main() -> int:
-    if len(sys.argv) == 1:
+    args = parse_flags(sys.argv[1:])
+
+    if args and args[0] == "healthcheck":
+        ok, msg = healthcheck()
+        print("OK" if ok else "FAILED")
+        print(msg)
+        return 0 if ok else 1
+
+    if not args:
         return shell_loop()
 
-    if len(sys.argv) < 3:
-        print("Usage: oroute <route> <prompt>")
+    if len(args) < 2:
+        print("Usage: oroute [--local-only] [--no-clipboard] [--no-notify] <route> <prompt>")
+        print("       oroute healthcheck")
         return 1
 
-    route = sys.argv[1].strip().lower()
-    prompt = " ".join(sys.argv[2:]).strip()
+    route = args[0].strip().lower()
+    prompt = " ".join(args[1:]).strip()
     print(route_once(route, prompt))
     return 0
 
